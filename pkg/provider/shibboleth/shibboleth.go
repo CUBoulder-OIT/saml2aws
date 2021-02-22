@@ -247,7 +247,7 @@ func verifyDuoMfa(oc *Client, duoHost string, parent string, tx string) (string,
 	}
 
 	// retrieve response from post
-	doc, err := goquery.NewDocumentFromResponse(res)
+	doc, err := goquery.NewDocumentFromReader(res.Body)
 	if err != nil {
 		return "", errors.Wrap(err, "error parsing document")
 	}
