@@ -30,7 +30,7 @@ func Login(loginFlags *flags.LoginExecFlags) error {
 		return errors.Wrap(err, "error building login details")
 	}
 
-	sharedCreds := awsconfig.NewSharedCredentials(account.Profile)
+	sharedCreds := awsconfig.NewSharedCredentials(account.Profile, account.CredentialsFile)
 
 	logger.Debug("check if Creds Exist")
 
@@ -45,13 +45,16 @@ func Login(loginFlags *flags.LoginExecFlags) error {
 	}
 
 	if !sharedCreds.Expired() && !loginFlags.Force {
-		log.Println("credentials are not expired skipping")
-		previous_creds, err := sharedCreds.Load()
+		logger.Debug("credentials are not expired skipping")
+		previousCreds, err := sharedCreds.Load()
 		if err != nil {
 			log.Println("Unable to load cached credentials")
 		}
 		if loginFlags.CredentialProcess {
-			PrintCredentialProcess(previous_creds)
+			err = PrintCredentialProcess(previousCreds)
+			if err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -110,7 +113,10 @@ func Login(loginFlags *flags.LoginExecFlags) error {
 
 	// print credential process if needed
 	if loginFlags.CredentialProcess {
-		PrintCredentialProcess(awsCreds)
+		err = PrintCredentialProcess(awsCreds)
+		if err != nil {
+			return err
+		}
 	}
 	return saveCredentials(awsCreds, sharedCreds)
 }
@@ -348,13 +354,12 @@ func CredentialsToCredentialProcess(awsCreds *awsconfig.AWSCredentials) (string,
 
 }
 
-// PrintCredentialProcess
-// Prints a Json output that is compatible with the AWS credential_process
+// PrintCredentialProcess Prints a Json output that is compatible with the AWS credential_process
 // https://github.com/awslabs/awsprocesscreds
 func PrintCredentialProcess(awsCreds *awsconfig.AWSCredentials) error {
-	json_output, err := CredentialsToCredentialProcess(awsCreds)
+	jsonData, err := CredentialsToCredentialProcess(awsCreds)
 	if err == nil {
-		fmt.Println(json_output)
+		fmt.Println(jsonData)
 	}
 	return err
 }
