@@ -55,67 +55,112 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	var samlAssertion string
 
 	shibbolethURL := fmt.Sprintf("%s/idp/profile/SAML2/Unsolicited/SSO?providerId=%s", loginDetails.URL, sc.idpAccount.AmazonWebservicesURN)
+	// Check keystore for shib session token, if it exists add it to the request
+	var sessionCookie string
+	//cookieItem, err := p.Keyring.Get("shib-session-cookie")
+	// if err == nil {
+	// 	sessionCookie = string(cookieItem.Data)
+	// }
 
-	res, err := sc.client.Get(shibbolethURL)
+	req, err := http.NewRequest("GET", shibbolethURL, nil)
+	if err != nil {
+		return samlAssertion, err
+	}
+
+	if sessionCookie != "" {
+		req.AddCookie(&http.Cookie{
+			Name:     "shib_idp_session",
+			Value:    sessionCookie,
+			Path:     "/idp",
+			HttpOnly: true,
+		})
+	}
+	res, err := sc.client.Do(req)
 	if err != nil {
 		return samlAssertion, errors.Wrap(err, "error retrieving form")
 	}
 
-	doc, err := goquery.NewDocumentFromResponse(res)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "failed to build document from response")
-	}
-
-	authForm := url.Values{}
-
-	doc.Find("input").Each(func(i int, s *goquery.Selection) {
-		updateFormData(authForm, s, loginDetails)
-	})
-
-	doc.Find("form").Each(func(i int, s *goquery.Selection) {
-		action, ok := s.Attr("action")
-		if !ok {
-			return
-		}
-		authSubmitURL = action
-	})
-
-	if authSubmitURL == "" {
-		return samlAssertion, fmt.Errorf("unable to locate IDP authentication form submit URL")
-	}
-
-	req, err := http.NewRequest("POST", authSubmitURL, strings.NewReader(authForm.Encode()))
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error building authentication request")
-	}
-
-	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	req.URL.Host = res.Request.URL.Host
-	req.URL.Scheme = res.Request.URL.Scheme
-
-	res, err = sc.client.Do(req)
-	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error retrieving login form results")
-	}
-
-	switch sc.idpAccount.MFA {
-	case "Auto":
-		b, _ := ioutil.ReadAll(res.Body)
-
-		mfaRes, err := verifyMfa(sc, loginDetails.URL, string(b))
-		if err != nil {
-			return mfaRes.Status, errors.Wrap(err, "error verifying MFA")
-		}
-
-		res = mfaRes
-
-	}
-
+	// If Get returns the SAML Assertion then the session token was good and we can skip to sending that token on to AWS
+	// Else follow the normal login process
 	samlAssertion, err = extractSamlResponse(res)
 	if err != nil {
-		return samlAssertion, errors.Wrap(err, "error extracting SAMLResponse blob from final Shibboleth response")
-	}
 
+		doc, err := goquery.NewDocumentFromResponse(res)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "failed to build document from response")
+		}
+
+		authForm := url.Values{}
+
+		doc.Find("input").Each(func(i int, s *goquery.Selection) {
+			updateFormData(authForm, s, loginDetails)
+		})
+
+		doc.Find("form").Each(func(i int, s *goquery.Selection) {
+			action, ok := s.Attr("action")
+			if !ok {
+				return
+			}
+			authSubmitURL = action
+		})
+
+		if authSubmitURL == "" {
+			return samlAssertion, fmt.Errorf("unable to locate IDP authentication form submit URL")
+		}
+
+		req, err = http.NewRequest("POST", authSubmitURL, strings.NewReader(authForm.Encode()))
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error building authentication request")
+		}
+
+		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
+		req.URL.Host = res.Request.URL.Host
+		req.URL.Scheme = res.Request.URL.Scheme
+
+		res, err = sc.client.Do(req)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error retrieving login form results")
+		}
+
+		// Extract Session Token
+		cookies := res.Cookies()
+		var newSessionCookie string
+		for _, cookie := range cookies {
+			if cookie.Name == "shib_idp_session" {
+				newSessionCookie = cookie.Value
+			}
+		}
+
+		switch sc.idpAccount.MFA {
+		case "Auto":
+			b, _ := ioutil.ReadAll(res.Body)
+
+			mfaRes, err := verifyMfa(sc, loginDetails.URL, string(b))
+			if err != nil {
+				return mfaRes.Status, errors.Wrap(err, "error verifying MFA")
+			}
+
+			res = mfaRes
+
+		}
+
+		//Add Shib Session Cookie to Keyring
+		// newCookieItem := keyring.Item{
+		// 	Key:   "shib-session-cookie",
+		// 	Data:  []byte(newSessionCookie),
+		// 	Label: "shib session cookie",
+		// 	KeychainNotTrustApplication: false,
+		// }
+		if newSessionCookie != "" {
+		}
+
+		//Add to Keyring Storage
+
+		samlAssertion, err = extractSamlResponse(res)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error extracting SAMLResponse blob from final Shibboleth response")
+		}
+	}
 	return samlAssertion, nil
 }
 
@@ -233,6 +278,7 @@ func verifyDuoMfa(oc *Client, duoHost string, parent string, tx string) (string,
 		"Phone Call",
 		"Passcode",
 	}
+	//TODO:  Allow Auto Push based on Command Line Flag
 
 	duoMfaOption := prompter.Choose("Select a DUO MFA Option", duoMfaOptions)
 
