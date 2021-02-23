@@ -15,6 +15,7 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/pkg/errors"
 	"github.com/tidwall/gjson"
+	"github.com/versent/saml2aws/v2/helper/credentials"
 	"github.com/versent/saml2aws/v2/pkg/cfg"
 	"github.com/versent/saml2aws/v2/pkg/creds"
 	"github.com/versent/saml2aws/v2/pkg/prompter"
@@ -57,10 +58,17 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	shibbolethURL := fmt.Sprintf("%s/idp/profile/SAML2/Unsolicited/SSO?providerId=%s", loginDetails.URL, sc.idpAccount.AmazonWebservicesURN)
 	// Check keystore for shib session token, if it exists add it to the request
 	var sessionCookie string
-	//cookieItem, err := p.Keyring.Get("shib-session-cookie")
-	// if err == nil {
-	// 	sessionCookie = string(cookieItem.Data)
-	// }
+	shibSessionURL := loginDetails.URL + ".shib_session_cookie"
+	sessionDetails := &creds.LoginDetails{URL: shibSessionURL, Username: "shib_session_cookie"}
+	//TODO: if !loginFlags.CommonFlags.DisableKeychain {
+	err := credentials.LookupCredentials(sessionDetails, "Shibboleth")
+	if err != nil {
+		if !credentials.IsErrCredentialsNotFound(err) {
+			return samlAssertion, errors.Wrap(err, "error loading saved session key")
+		}
+	}
+	sessionCookie = sessionDetails.Password
+	//}
 
 	req, err := http.NewRequest("GET", shibbolethURL, nil)
 	if err != nil {
@@ -84,6 +92,10 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	// Else follow the normal login process
 	samlAssertion, err = extractSamlResponse(res)
 	if err != nil {
+		res, err := sc.client.Get(shibbolethURL)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error retrieving form")
+		}
 
 		doc, err := goquery.NewDocumentFromResponse(res)
 		if err != nil {
@@ -122,6 +134,19 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 			return samlAssertion, errors.Wrap(err, "error retrieving login form results")
 		}
 
+		switch sc.idpAccount.MFA {
+		case "Auto":
+			b, _ := ioutil.ReadAll(res.Body)
+
+			mfaRes, err := verifyMfa(sc, loginDetails.URL, string(b), loginDetails.DuoMFAOption)
+			if err != nil {
+				return mfaRes.Status, errors.Wrap(err, "error verifying MFA")
+			}
+
+			res = mfaRes
+
+		}
+
 		// Extract Session Token
 		cookies := res.Cookies()
 		var newSessionCookie string
@@ -131,30 +156,13 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 			}
 		}
 
-		switch sc.idpAccount.MFA {
-		case "Auto":
-			b, _ := ioutil.ReadAll(res.Body)
-
-			mfaRes, err := verifyMfa(sc, loginDetails.URL, string(b))
-			if err != nil {
-				return mfaRes.Status, errors.Wrap(err, "error verifying MFA")
-			}
-
-			res = mfaRes
-
-		}
-
 		//Add Shib Session Cookie to Keyring
-		// newCookieItem := keyring.Item{
-		// 	Key:   "shib-session-cookie",
-		// 	Data:  []byte(newSessionCookie),
-		// 	Label: "shib session cookie",
-		// 	KeychainNotTrustApplication: false,
-		// }
-		if newSessionCookie != "" {
+		//if !loginFlags.CommonFlags.DisableKeychain {
+		err = credentials.SaveCredentials(shibSessionURL, "shib_session_cookie", newSessionCookie)
+		if err != nil {
+			return samlAssertion, errors.Wrap(err, "error storing password in keychain")
 		}
-
-		//Add to Keyring Storage
+		//}
 
 		samlAssertion, err = extractSamlResponse(res)
 		if err != nil {
@@ -188,13 +196,13 @@ func updateFormData(authForm url.Values, s *goquery.Selection, user *creds.Login
 	}
 }
 
-func verifyMfa(oc *Client, shibbolethHost string, resp string) (*http.Response, error) {
+func verifyMfa(oc *Client, shibbolethHost string, resp string, loginDuoMFAOption string) (*http.Response, error) {
 
 	duoHost, postAction, tx, app := parseTokens(resp)
 
 	parent := fmt.Sprintf(shibbolethHost + postAction)
 
-	duoTxCookie, err := verifyDuoMfa(oc, duoHost, parent, tx)
+	duoTxCookie, err := verifyDuoMfa(oc, duoHost, parent, tx, loginDuoMFAOption)
 	if err != nil {
 		return nil, errors.Wrap(err, "error when interacting with Duo iframe")
 	}
@@ -218,7 +226,7 @@ func verifyMfa(oc *Client, shibbolethHost string, resp string) (*http.Response, 
 	return res, nil
 }
 
-func verifyDuoMfa(oc *Client, duoHost string, parent string, tx string) (string, error) {
+func verifyDuoMfa(oc *Client, duoHost string, parent string, tx string, loginDuoMFAOption string) (string, error) {
 	// initiate duo mfa to get sid
 	duoSubmitURL := fmt.Sprintf("https://%s/frame/web/v1/auth", duoHost)
 
@@ -279,14 +287,20 @@ func verifyDuoMfa(oc *Client, duoHost string, parent string, tx string) (string,
 		"Passcode",
 	}
 	//TODO:  Allow Auto Push based on Command Line Flag
+	duoMfaOption := 0
 
-	duoMfaOption := prompter.Choose("Select a DUO MFA Option", duoMfaOptions)
+	if loginDuoMFAOption == "Duo Push" {
+		duoMfaOption = 0
+	} else if loginDuoMFAOption == "Passcode" {
+		duoMfaOption = 1
+	} else {
+		duoMfaOption = prompter.Choose("Select a DUO MFA Option", duoMfaOptions)
+	}
 
 	if duoMfaOptions[duoMfaOption] == "Passcode" {
 		//get users DUO MFA Token
 		token = prompter.StringRequired("Enter passcode")
 	}
-
 	// send mfa auth request
 	duoSubmitURL = fmt.Sprintf("https://%s/frame/prompt", duoHost)
 
@@ -443,5 +457,8 @@ func extractSamlResponse(res *http.Response) (string, error) {
 
 	samlRgx := regexp.MustCompile(`name=\"SAMLResponse\" value=\"(.*?)\"/>`)
 	samlResponseValue := samlRgx.FindStringSubmatch(string(body))
+	if len(samlResponseValue) < 1 {
+		return "", errors.New("extractSamlResponse: SAML Response not found")
+	}
 	return samlResponseValue[1], nil
 }
