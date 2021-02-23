@@ -60,7 +60,7 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 	var sessionCookie string
 	shibSessionURL := loginDetails.URL + ".shib_session_cookie"
 	sessionDetails := &creds.LoginDetails{URL: shibSessionURL, Username: "shib_session_cookie"}
-	//TODO: if !loginFlags.CommonFlags.DisableKeychain {
+
 	err := credentials.LookupCredentials(sessionDetails, "Shibboleth")
 	if err != nil {
 		if !credentials.IsErrCredentialsNotFound(err) {
@@ -68,7 +68,6 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		}
 	}
 	sessionCookie = sessionDetails.Password
-	//}
 
 	req, err := http.NewRequest("GET", shibbolethURL, nil)
 	if err != nil {
@@ -97,7 +96,7 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 			return samlAssertion, errors.Wrap(err, "error retrieving form")
 		}
 
-		doc, err := goquery.NewDocumentFromResponse(res)
+		doc, err := goquery.NewDocumentFromReader(res.Body)
 		if err != nil {
 			return samlAssertion, errors.Wrap(err, "failed to build document from response")
 		}
@@ -157,12 +156,10 @@ func (sc *Client) Authenticate(loginDetails *creds.LoginDetails) (string, error)
 		}
 
 		//Add Shib Session Cookie to Keyring
-		//if !loginFlags.CommonFlags.DisableKeychain {
 		err = credentials.SaveCredentials(shibSessionURL, "shib_session_cookie", newSessionCookie)
 		if err != nil {
 			return samlAssertion, errors.Wrap(err, "error storing password in keychain")
 		}
-		//}
 
 		samlAssertion, err = extractSamlResponse(res)
 		if err != nil {
