@@ -18,6 +18,7 @@ import (
 	"github.com/versent/saml2aws/v2/pkg/cfg"
 	"github.com/versent/saml2aws/v2/pkg/creds"
 	"github.com/versent/saml2aws/v2/pkg/flags"
+	"github.com/versent/saml2aws/v2/pkg/samlcache"
 )
 
 // Login login to ADFS
@@ -31,6 +32,11 @@ func Login(loginFlags *flags.LoginExecFlags) error {
 	}
 
 	sharedCreds := awsconfig.NewSharedCredentials(account.Profile, account.CredentialsFile)
+	// creates a cacheProvider, only used when --cache is set
+	cacheProvider := &samlcache.SAMLCacheProvider{
+		Account:  account.Name,
+		Filename: account.SAMLCacheFile,
+	}
 
 	logger.Debug("check if Creds Exist")
 
@@ -77,12 +83,33 @@ func Login(loginFlags *flags.LoginExecFlags) error {
 		return errors.Wrap(err, "error validating login details")
 	}
 
-	log.Printf("Authenticating as %s ...", loginDetails.Username)
+	var samlAssertion string
+	if account.SAMLCache {
+		if cacheProvider.IsValid() {
+			samlAssertion, err = cacheProvider.Read()
+			if err != nil {
+				return errors.Wrap(err, "Could not read saml cache")
+			}
+		} else {
+			logger.Debug("Cache is invalid")
+			log.Printf("Authenticating as %s ...", loginDetails.Username)
+		}
+	} else {
+		log.Printf("Authenticating as %s ...", loginDetails.Username)
+	}
 
-	samlAssertion, err := provider.Authenticate(loginDetails)
-	if err != nil {
-		return errors.Wrap(err, "error authenticating to IdP")
-
+	if samlAssertion == "" {
+		// samlAssertion was not cached
+		samlAssertion, err = provider.Authenticate(loginDetails)
+		if err != nil {
+			return errors.Wrap(err, "error authenticating to IdP")
+		}
+		if account.SAMLCache {
+			err = cacheProvider.Write(samlAssertion)
+			if err != nil {
+				return errors.Wrap(err, "Could not write saml cache")
+			}
+		}
 	}
 
 	if samlAssertion == "" {
@@ -343,7 +370,7 @@ func CredentialsToCredentialProcess(awsCreds *awsconfig.AWSCredentials) (string,
 		AccessKeyId:     awsCreds.AWSAccessKey,
 		SecretAccessKey: awsCreds.AWSSecretKey,
 		SessionToken:    awsCreds.AWSSessionToken,
-		Expiration:      awsCreds.Expires.Format("2006-01-02T15:04:05Z07:00"),
+		Expiration:      awsCreds.Expires.Format("2006-01-02T15:04:05-07:00"),
 	}
 
 	p, err := json.Marshal(cred_process)
